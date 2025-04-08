@@ -1,12 +1,11 @@
 import torch
-import torchaudio
 import lightning as L
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import optim
 from models.stft import STFT
 from models.swin_unet.vision_transformer import SwinUnet
 from models.bert.word_embbeding import WordEmbbeding
-from transformers import HubertModel
 from torchmetrics.functional.audio import scale_invariant_signal_noise_ratio
 
 
@@ -17,6 +16,32 @@ class RelativePositionEncoding(nn.Module):
 
     def forward(self, x):
         return x + self.pos_emb[:x.shape[1], :].unsqueeze(0)  # 加到輸入上
+
+
+class LightTextGuidedMaskFusion(nn.Module):
+    def __init__(self, embed_dim=512, num_masks=3):
+        super().__init__()
+        self.score_head = nn.Linear(embed_dim, num_masks)  # 輕量映射出 N 個權重
+
+    def forward(self, text_embed, masks):
+        """
+        text_embed: [B, L, D]
+        masks: [B, N, H, W]
+        """
+        B, N, H, W = masks.shape
+        _, L, D = text_embed.shape
+
+        # Step 1: 平均詞向量 → [B, D]
+        text_vec = text_embed.mean(dim=1)  # [B, D]
+
+        # Step 2: 線性投影出權重分數
+        attn_scores = self.score_head(text_vec)  # [B, N]
+        attn_weights = F.softmax(attn_scores, dim=-1)  # [B, N]
+
+        # Step 3: 加權融合
+        weighted_mask = (attn_weights.view(B, N, 1, 1) * masks).sum(dim=1)  # [B, H, W]
+
+        return weighted_mask.unsqueeze(1)  # [B, 1, H, W]
 
 
 class SwinUnetLASS(L.LightningModule):
@@ -51,8 +76,33 @@ class SwinUnetLASS(L.LightningModule):
         )
         # Mask Generator
         self.generator  = nn.Sequential(
-            SwinUnet(img_size=embed_dim, num_classes=4),
-            nn.ReLU()
+            nn.Conv2d(
+                in_channels  = 1,
+                out_channels = 3,
+                kernel_size  = 4,
+                stride       = 2,
+                padding      = 1,
+            ),
+            nn.BatchNorm2d(3),
+            SwinUnet(
+                img_size=embed_dim//2,
+                num_classes=3
+            ),
+            nn.ReLU(),
+            nn.ConvTranspose2d(
+                in_channels  = 3,
+                out_channels = 3,
+                kernel_size  = 4,
+                stride       = 2,
+                padding      = 1
+            ),
+            nn.BatchNorm2d(3),
+            nn.ReLU(),
+        )
+        # Mask Query
+        self.TGMF       = LightTextGuidedMaskFusion(
+            embed_dim=embed_dim,
+            num_masks=3
         )
         
     def forward(self, audio: torch.Tensor, query: list[str], output_mag: bool = False):
@@ -68,7 +118,8 @@ class SwinUnetLASS(L.LightningModule):
         # 3. Cross Attention 的輸出計算Mask
         # 4. Mask 與 STFT Magnitude 哈達瑪乘積
         #
-        query        = self.word_emb(query)                         # Query (B, tokens, 768)
+        query        = self.word_emb(query)
+
         residual     = mag
         mag_query    = self.pos_enc(mag.squeeze(1).transpose(1,2))
         mag_query, _ = self.cross_attn(                             # CrossAttention Query & Magnitude
@@ -77,7 +128,8 @@ class SwinUnetLASS(L.LightningModule):
                             value = query
                         )
         mag_query    = residual + 0.5 * mag_query.transpose(1,2).unsqueeze(1)
-        masked_mag   = self.generator(mag_query) * mag              # Apply Mask
+        masks        = self.generator(mag_query)
+        masked_mag   = self.TGMF(query, masks) * mag                # Apply Mask
 
         #
         # ISTFT Decoder
@@ -115,9 +167,10 @@ class SwinUnetLASS(L.LightningModule):
         pred     = pred.cpu().detach()[0]
         audio    = audio.cpu().detach()[0]
         target   = target.cpu().detach()[0]
-        # torchaudio.save("./temp/out.wav", pred, 32000)
-        # torchaudio.save("./temp/mix.wav", audio, 32000)
-        # torchaudio.save("./temp/target.wav", target, 32000)
+        
+        torchaudio.save("./temp/out.wav", pred, 32000)
+        torchaudio.save("./temp/mix.wav", audio, 32000)
+        torchaudio.save("./temp/target.wav", target, 32000)
 
     def configure_optimizers(self):
         optimizer = optim.AdamW([
@@ -143,6 +196,7 @@ class SwinUnetLASS(L.LightningModule):
                 "frequency": 1            # 每個 epoch 檢查
             }
         }
+
 
 def our_loss(
         pred: torch.Tensor, tgt: torch.Tensor,
