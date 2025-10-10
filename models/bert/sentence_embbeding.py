@@ -7,16 +7,6 @@ class SentenceEmbbeding(nn.Module):
         super().__init__()
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model = SentenceTransformer("all-MiniLM-L6-v2")
-        
-        # 先凍結所有參數
-        for param in self.model.parameters():
-            param.requires_grad = False
-
-        # 只解凍最後 last_n_layers 層
-        encoder_layers = self.model[0].auto_model.encoder.layer
-        for layer in encoder_layers[-last_n_layers:]:
-            for param in layer.parameters():
-                param.requires_grad = True
     
     def forward(self, x: list[str]) -> torch.Tensor:
         out = torch.from_numpy(self.model.encode(x)).to(self.device)

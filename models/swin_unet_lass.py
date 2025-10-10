@@ -6,6 +6,7 @@ from torch import optim
 from models.stft import STFT
 from models.swin_unet.vision_transformer import SwinUnet
 from models.bert.word_embbeding import WordEmbbeding
+from models.bert.sentence_embbeding import SentenceEmbbeding
 from torchmetrics.functional.audio import scale_invariant_signal_noise_ratio
 
 
@@ -56,8 +57,8 @@ class SwinUnetLASS(L.LightningModule):
         
         # Word Embbeding
         self.word_emb   = nn.Sequential(
-            WordEmbbeding(),
-            nn.Linear(768, embed_dim),
+            SentenceEmbbeding(),
+            nn.Linear(384, embed_dim),
             nn.LayerNorm(embed_dim)
         )
         # STFT Module
@@ -66,12 +67,28 @@ class SwinUnetLASS(L.LightningModule):
             hop_length  = hop_length,
             win_length  = win_length
         )
+        # Mag & Text Positional Encoding & Self Attention
+        self.txt_pos_enc= RelativePositionEncoding(embed_dim, embed_dim)
+        self.text_attn  = nn.MultiheadAttention(
+            embed_dim   = embed_dim,
+            num_heads   = 2,
+            dropout     = 0.1,
+            batch_first = True
+        )
+        self.text_layernorm = nn.LayerNorm(embed_dim)
+        self.mag_pos_enc= RelativePositionEncoding(embed_dim, embed_dim)
+        self.mag_attn   = nn.MultiheadAttention(
+            embed_dim   = embed_dim,
+            num_heads   = 2,
+            dropout     = 0.1,
+            batch_first = True
+        )
+        self.mag_layernorm = nn.LayerNorm(embed_dim)
         # Cross Attention
-        self.pos_enc    = RelativePositionEncoding(embed_dim, embed_dim)
         self.cross_attn = nn.MultiheadAttention(
             embed_dim   = embed_dim,
             num_heads   = 8,
-            dropout     = 0.1,
+            dropout     = 0.1, 
             batch_first = True
         )
         # Mask Generator
@@ -81,36 +98,37 @@ class SwinUnetLASS(L.LightningModule):
                 out_channels = 3,
                 kernel_size  = 4,
                 stride       = 2,
-                padding      = 1,
-            ),
-            nn.BatchNorm2d(3),
-            SwinUnet(
-                img_size=embed_dim//2,
-                num_classes=3
-            ),
-            nn.ReLU(),
-            nn.ConvTranspose2d(
-                in_channels  = 3,
-                out_channels = 3,
-                kernel_size  = 4,
-                stride       = 2,
                 padding      = 1
             ),
-            nn.BatchNorm2d(3),
-            nn.ReLU(),
-        )
-        # Mask Query
-        self.TGMF       = LightTextGuidedMaskFusion(
-            embed_dim=embed_dim,
-            num_masks=3
+            nn.LayerNorm([3, embed_dim//2, embed_dim//2]),
+            SwinUnet(
+                img_size=embed_dim//2,
+                num_classes=1
+            ),
+            nn.ConvTranspose2d(
+                in_channels  = 1,
+                out_channels = 1,
+                kernel_size  = 2,
+                stride       = 2,
+            ),
+            nn.LayerNorm([1, embed_dim, embed_dim]),
+            nn.LeakyReLU()
         )
         
     def forward(self, audio: torch.Tensor, query: list[str], output_mag: bool = False):
         #
         # STFT Encoder
         #
-        mag, pha, L  = self.stft.stft(audio)                        # STFT
-
+        mag, pha, L  = self.stft.stft(audio)
+        mag_query    = self.mag_pos_enc(mag.squeeze(1))
+        residual     = mag_query
+        mag_query, _ = self.mag_attn(
+                            query = mag_query,
+                            key   = mag_query,
+                            value = mag_query
+                        )
+        mag_query    = residual + 0.5 * mag_query
+        mag_query    = self.mag_layernorm(mag_query)
         #
         # Text Query 與 STFT Magnitude 進行 Cross Attention
         # 1. Text Query 進行 BERT Embbeding
@@ -118,18 +136,26 @@ class SwinUnetLASS(L.LightningModule):
         # 3. Cross Attention 的輸出計算Mask
         # 4. Mask 與 STFT Magnitude 哈達瑪乘積
         #
-        query        = self.word_emb(query)
-
-        residual     = mag
-        mag_query    = self.pos_enc(mag.squeeze(1).transpose(1,2))
-        mag_query, _ = self.cross_attn(                             # CrossAttention Query & Magnitude
-                            query = mag_query,
-                            key   = query,
-                            value = query
+        txt_query    = self.word_emb(query)
+        txt_query    = self.txt_pos_enc(txt_query)
+        residual     = txt_query
+        txt_query, _ = self.text_attn(
+                            query = txt_query,
+                            key   = txt_query,
+                            value = txt_query
                         )
-        mag_query    = residual + 0.5 * mag_query.transpose(1,2).unsqueeze(1)
-        masks        = self.generator(mag_query)
-        masked_mag   = self.TGMF(query, masks) * mag                # Apply Mask
+        txt_query    = residual + 0.5 * txt_query
+        txt_query    = self.mag_layernorm(txt_query)
+        
+
+        residual     = mag_query
+        mag_query, _ = self.cross_attn(                             # CrossAttention Query & Magnitude
+                            query = txt_query,
+                            key   = mag_query,
+                            value = mag_query
+                        )
+        mag_query    = residual + 0.5 * mag_query.unsqueeze(1)
+        masked_mag   = self.generator(mag_query) * mag
 
         #
         # ISTFT Decoder
@@ -176,8 +202,8 @@ class SwinUnetLASS(L.LightningModule):
         optimizer = optim.AdamW([
             {
                 "params": self.parameters(),
-                "lr": 3e-4,
-                "weight_decay": 0.01
+                "lr": 1e-4,
+                "weight_decay": 1e-4
             }   # SeparationNET
         ])
 
@@ -205,4 +231,4 @@ def our_loss(
     sisnr_loss     = scale_invariant_signal_noise_ratio(pred, tgt).negative().mean()
     mag_l1_loss    = torch.nn.functional.smooth_l1_loss(*mag).mean()
     spec_l1_loss   = torch.nn.functional.l1_loss(pred, tgt).mean()
-    return sisnr_loss + 0.5 * mag_l1_loss + 0.5 * spec_l1_loss
+    return sisnr_loss + 0.1 * mag_l1_loss + 0.1 * spec_l1_loss

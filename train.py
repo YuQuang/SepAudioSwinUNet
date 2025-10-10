@@ -12,14 +12,14 @@ def load_data() -> Tuple[DataLoader, DataLoader]:
     )
     train_loader      = DataLoader(
         dataset       = train_dataset,
-        batch_size    = 4,
-        num_workers   = 4,
+        batch_size    = 1,
+        num_workers   = 1,
         persistent_workers=True
     )
     valid_loader      = DataLoader(
         dataset       = valid_dataset,
-        batch_size    = 4,
-        num_workers   = 4,
+        batch_size    = 1,
+        num_workers   = 1,
         persistent_workers=True
     )
     return train_loader, valid_loader
@@ -39,5 +39,5 @@ if __name__ == "__main__":
         model,
         train_dataloaders=train_loader,
         val_dataloaders=valid_loader,
-        ckpt_path="./lightning_logs/version_5/checkpoints/epoch=311-step=140400.ckpt"
+        ckpt_path="./lightning_logs/version_2/checkpoints/epoch=6-step=12600.ckpt"
     )
