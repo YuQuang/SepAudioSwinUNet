@@ -13,19 +13,19 @@ def load_data() -> Tuple[DataLoader, DataLoader]:
     train_loader      = DataLoader(
         dataset       = train_dataset,
         batch_size    = 1,
-        num_workers   = 1,
+        num_workers   = 4,
         persistent_workers=True
     )
     valid_loader      = DataLoader(
         dataset       = valid_dataset,
         batch_size    = 1,
-        num_workers   = 1,
+        num_workers   = 4,
         persistent_workers=True
     )
     return train_loader, valid_loader
 
 if __name__ == "__main__":
-    torch.set_float32_matmul_precision('high')
+    torch.set_float32_matmul_precision('medium')
     model = SwinUnetLASS()
 
     train_loader, valid_loader = load_data()
@@ -38,6 +38,5 @@ if __name__ == "__main__":
     trainer.fit(
         model,
         train_dataloaders=train_loader,
-        val_dataloaders=valid_loader,
-        ckpt_path="./lightning_logs/version_2/checkpoints/epoch=6-step=12600.ckpt"
+        val_dataloaders=valid_loader
     )

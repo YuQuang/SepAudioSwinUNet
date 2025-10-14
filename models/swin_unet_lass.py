@@ -49,25 +49,29 @@ class SwinUnetLASS(L.LightningModule):
     def __init__(
             self,
             embed_dim   = 512,
-            n_fft       = 1023,
-            hop_length  = 1023 // 4,
-            win_length  = 1023
+            n_fft       = 512,
+            hop_length  = 1024 // 4,
+            win_length  = 1024
         ):
         super().__init__()
-        
         # Word Embbeding
         self.word_emb   = nn.Sequential(
-            SentenceEmbbeding(),
-            nn.Linear(384, embed_dim),
+            WordEmbbeding(),
+            nn.Linear(768, embed_dim),
             nn.LayerNorm(embed_dim)
         )
-        # STFT Module
-        self.stft       = STFT(
-            n_fft       = n_fft,
-            hop_length  = hop_length,
-            win_length  = win_length
+
+        # Audio Encoder
+        self.encoder    = nn.Conv1d(
+            in_channels = 1,
+            out_channels= n_fft,
+            kernel_size = win_length,
+            stride      = hop_length,
+            padding     = win_length//2 + hop_length//2,
+            bias        = False
         )
-        # Mag & Text Positional Encoding & Self Attention
+
+        # Text Pos-enc & Self Attention
         self.txt_pos_enc= RelativePositionEncoding(embed_dim, embed_dim)
         self.text_attn  = nn.MultiheadAttention(
             embed_dim   = embed_dim,
@@ -76,6 +80,8 @@ class SwinUnetLASS(L.LightningModule):
             batch_first = True
         )
         self.text_layernorm = nn.LayerNorm(embed_dim)
+
+        # Mag Pos-enc & Self Attention
         self.mag_pos_enc= RelativePositionEncoding(embed_dim, embed_dim)
         self.mag_attn   = nn.MultiheadAttention(
             embed_dim   = embed_dim,
@@ -84,6 +90,7 @@ class SwinUnetLASS(L.LightningModule):
             batch_first = True
         )
         self.mag_layernorm = nn.LayerNorm(embed_dim)
+
         # Cross Attention
         self.cross_attn = nn.MultiheadAttention(
             embed_dim   = embed_dim,
@@ -91,6 +98,7 @@ class SwinUnetLASS(L.LightningModule):
             dropout     = 0.1, 
             batch_first = True
         )
+
         # Mask Generator
         self.generator  = nn.Sequential(
             nn.Conv2d(
@@ -102,8 +110,8 @@ class SwinUnetLASS(L.LightningModule):
             ),
             nn.LayerNorm([3, embed_dim//2, embed_dim//2]),
             SwinUnet(
-                img_size=embed_dim//2,
-                num_classes=1
+                img_size     = embed_dim//2,
+                num_classes  = 1
             ),
             nn.ConvTranspose2d(
                 in_channels  = 1,
@@ -114,12 +122,21 @@ class SwinUnetLASS(L.LightningModule):
             nn.LayerNorm([1, embed_dim, embed_dim]),
             nn.LeakyReLU()
         )
-        
-    def forward(self, audio: torch.Tensor, query: list[str], output_mag: bool = False):
-        #
+
+        # Audio Decoder
+        self.decoder     = nn.ConvTranspose1d(
+            in_channels  = n_fft,
+            out_channels = 1,
+            kernel_size  = win_length,
+            stride       = hop_length,
+            padding      = win_length//2 + hop_length//2,
+            bias         = False
+        )
+    
+
+    def forward(self, audio: torch.Tensor, query: list[str]):
         # STFT Encoder
-        #
-        mag, pha, L  = self.stft.stft(audio)
+        mag          = self.encoder(audio)
         mag_query    = self.mag_pos_enc(mag.squeeze(1))
         residual     = mag_query
         mag_query, _ = self.mag_attn(
@@ -129,13 +146,8 @@ class SwinUnetLASS(L.LightningModule):
                         )
         mag_query    = residual + 0.5 * mag_query
         mag_query    = self.mag_layernorm(mag_query)
-        #
-        # Text Query 與 STFT Magnitude 進行 Cross Attention
-        # 1. Text Query 進行 BERT Embbeding
-        # 2. STFT Magnitude 進行 Cross Attention
-        # 3. Cross Attention 的輸出計算Mask
-        # 4. Mask 與 STFT Magnitude 哈達瑪乘積
-        #
+        
+        # Text Encoder
         txt_query    = self.word_emb(query)
         txt_query    = self.txt_pos_enc(txt_query)
         residual     = txt_query
@@ -145,35 +157,26 @@ class SwinUnetLASS(L.LightningModule):
                             value = txt_query
                         )
         txt_query    = residual + 0.5 * txt_query
-        txt_query    = self.mag_layernorm(txt_query)
+        txt_query    = self.text_layernorm(txt_query)
         
-
+        # CrossAttention Query & Magnitude
         residual     = mag_query
-        mag_query, _ = self.cross_attn(                             # CrossAttention Query & Magnitude
-                            query = txt_query,
-                            key   = mag_query,
-                            value = mag_query
+        mag_query, _ = self.cross_attn(
+                            query = mag_query,
+                            key   = txt_query,
+                            value = txt_query
                         )
-        mag_query    = residual + 0.5 * mag_query.unsqueeze(1)
-        masked_mag   = self.generator(mag_query) * mag
+        mag_query    = residual + 0.5 * mag_query.unsqueeze(0)
+        masked_mag   = self.generator(mag_query).squeeze(0) * mag
 
-        #
-        # ISTFT Decoder
-        #
-        out          = self.stft.istft(                             # ISTFT
-                            torch.cat((masked_mag, pha), dim=1),
-                            L
-                        )
-        if output_mag: return out, masked_mag
+        # Decoder
+        out          = self.decoder(masked_mag)
         return out
 
     def training_step(self, batch, batch_idx):
         audio, query, target = batch
-        pred, masked_mag     = self.forward(audio, query, output_mag=True)
-        loss                 = our_loss(
-                                    pred, target,
-                                    ( masked_mag, self.stft.stft(target)[0] )
-                                )
+        pred                 = self.forward(audio, query)
+        loss                 = our_loss(pred, target)
         self.log_dict({ "train_our_loss": loss }, prog_bar=True, batch_size=audio.shape[0])
         return loss
 
@@ -225,10 +228,8 @@ class SwinUnetLASS(L.LightningModule):
 
 
 def our_loss(
-        pred: torch.Tensor, tgt: torch.Tensor,
-        mag: tuple[torch.Tensor, torch.Tensor]
+        pred: torch.Tensor, tgt: torch.Tensor
     ) -> torch.Tensor:
     sisnr_loss     = scale_invariant_signal_noise_ratio(pred, tgt).negative().mean()
-    mag_l1_loss    = torch.nn.functional.smooth_l1_loss(*mag).mean()
     spec_l1_loss   = torch.nn.functional.l1_loss(pred, tgt).mean()
-    return sisnr_loss + 0.1 * mag_l1_loss + 0.1 * spec_l1_loss
+    return sisnr_loss + 0.1 * spec_l1_loss
