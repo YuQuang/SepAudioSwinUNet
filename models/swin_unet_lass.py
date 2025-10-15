@@ -19,32 +19,6 @@ class RelativePositionEncoding(nn.Module):
         return x + self.pos_emb[:x.shape[1], :].unsqueeze(0)  # 加到輸入上
 
 
-class LightTextGuidedMaskFusion(nn.Module):
-    def __init__(self, embed_dim=512, num_masks=3):
-        super().__init__()
-        self.score_head = nn.Linear(embed_dim, num_masks)  # 輕量映射出 N 個權重
-
-    def forward(self, text_embed, masks):
-        """
-        text_embed: [B, L, D]
-        masks: [B, N, H, W]
-        """
-        B, N, H, W = masks.shape
-        _, L, D = text_embed.shape
-
-        # Step 1: 平均詞向量 → [B, D]
-        text_vec = text_embed.mean(dim=1)  # [B, D]
-
-        # Step 2: 線性投影出權重分數
-        attn_scores = self.score_head(text_vec)  # [B, N]
-        attn_weights = F.softmax(attn_scores, dim=-1)  # [B, N]
-
-        # Step 3: 加權融合
-        weighted_mask = (attn_weights.view(B, N, 1, 1) * masks).sum(dim=1)  # [B, H, W]
-
-        return weighted_mask.unsqueeze(1)  # [B, 1, H, W]
-
-
 class SwinUnetLASS(L.LightningModule):
     def __init__(
             self,
@@ -104,13 +78,12 @@ class SwinUnetLASS(L.LightningModule):
             nn.Conv2d(
                 in_channels  = 1,
                 out_channels = 3,
-                kernel_size  = 4,
-                stride       = 2,
-                padding      = 1
+                kernel_size  = 1,
+                stride       = 1
             ),
-            nn.LayerNorm([3, embed_dim//2, embed_dim//2]),
+            nn.LayerNorm([3, embed_dim, embed_dim]),
             SwinUnet(
-                img_size     = embed_dim//2,
+                img_size     = embed_dim,
                 num_classes  = 1
             ),
             nn.ConvTranspose2d(
@@ -120,7 +93,7 @@ class SwinUnetLASS(L.LightningModule):
                 stride       = 2,
             ),
             nn.LayerNorm([1, embed_dim, embed_dim]),
-            nn.LeakyReLU()
+            nn.ReLU()
         )
 
         # Audio Decoder
@@ -144,7 +117,7 @@ class SwinUnetLASS(L.LightningModule):
                             key   = mag_query,
                             value = mag_query
                         )
-        mag_query    = residual + 0.5 * mag_query
+        mag_query    = 0.1 * residual + mag_query
         mag_query    = self.mag_layernorm(mag_query)
         
         # Text Encoder
@@ -156,7 +129,7 @@ class SwinUnetLASS(L.LightningModule):
                             key   = txt_query,
                             value = txt_query
                         )
-        txt_query    = residual + 0.5 * txt_query
+        txt_query    = 0.1 * residual + txt_query
         txt_query    = self.text_layernorm(txt_query)
         
         # CrossAttention Query & Magnitude
@@ -166,7 +139,7 @@ class SwinUnetLASS(L.LightningModule):
                             key   = txt_query,
                             value = txt_query
                         )
-        mag_query    = residual + 0.5 * mag_query.unsqueeze(0)
+        mag_query    = 0.1 * residual + mag_query.unsqueeze(0)
         masked_mag   = self.generator(mag_query).squeeze(0) * mag
 
         # Decoder
