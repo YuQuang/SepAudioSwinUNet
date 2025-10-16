@@ -38,6 +38,5 @@ if __name__ == "__main__":
     trainer.fit(
         model,
         train_dataloaders=train_loader,
-        val_dataloaders=valid_loader,
-        ckpt_path="./lightning_logs/version_2/checkpoints/epoch=6-step=12600.ckpt"
+        val_dataloaders=valid_loader
     )

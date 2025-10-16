@@ -7,6 +7,7 @@ from models.stft import STFT
 # Mask Generator
 from models.unet.unet_model import UNet
 from models.swin_unet.vision_transformer import SwinUnet
+from models.dit.dit import DiT
 # Word embbeding
 from models.bert.word_embbeding import WordEmbbeding
 from models.bert.sentence_embbeding import SentenceEmbbeding
@@ -70,9 +71,10 @@ class SwinUnetLASS(L.LightningModule):
         )
         # Mask Generator
         self.generator  = nn.Sequential(
-            UNet(
-                n_channels=1,
-                n_classes=1
+            DiT(
+                img_size=512,
+                dim=512,
+                in_channels=1,
             ),
             # SwinUnet(
             #     img_size=embed_dim,
