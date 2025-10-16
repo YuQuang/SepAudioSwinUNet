@@ -4,7 +4,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import optim
 from models.stft import STFT
+# Mask Generator
+from models.unet.unet_model import UNet
 from models.swin_unet.vision_transformer import SwinUnet
+# Word embbeding
 from models.bert.word_embbeding import WordEmbbeding
 from models.bert.sentence_embbeding import SentenceEmbbeding
 from torchmetrics.functional.audio import scale_invariant_signal_noise_ratio
@@ -67,19 +70,16 @@ class SwinUnetLASS(L.LightningModule):
         )
         # Mask Generator
         self.generator  = nn.Sequential(
-            nn.Conv2d(
-                in_channels  = 1,
-                out_channels = 3,
-                kernel_size  = 1,
-                stride       = 1
+            UNet(
+                n_channels=1,
+                n_classes=1
             ),
-            nn.LayerNorm([3, embed_dim, embed_dim]),
-            SwinUnet(
-                img_size=embed_dim,
-                num_classes=1
-            ),
+            # SwinUnet(
+            #     img_size=embed_dim,
+            #     num_classes=1
+            # ),
             nn.LayerNorm([1, embed_dim, embed_dim]),
-            nn.LeakyReLU()
+            nn.ReLU()
         )
         
     def forward(self, audio: torch.Tensor, query: list[str], output_mag: bool = False):
