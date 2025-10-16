@@ -86,12 +86,6 @@ class SwinUnetLASS(L.LightningModule):
                 img_size     = embed_dim,
                 num_classes  = 1
             ),
-            nn.ConvTranspose2d(
-                in_channels  = 1,
-                out_channels = 1,
-                kernel_size  = 2,
-                stride       = 2,
-            ),
             nn.LayerNorm([1, embed_dim, embed_dim]),
             nn.ReLU()
         )
